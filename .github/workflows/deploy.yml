@@ -1,78 +1,44 @@
-name: Build & Deploy to Azure Container Apps
+name: Deploy to Azure Container Apps
 
 on:
   push:
-    branches: [ main ]
-
-env:
-  APP_NAME: py-hello-${{ github.run_number }}
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/py-hello:${{ github.sha }}
-  RG_DEV: rg-proto-dev
+    branches:
+      - main   # runs whenever you push to main
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write   # push to GHCR
-      id-token: write   # OIDC login to Azure
+      id-token: write    # allow GitHub to mint an OIDC token
+      contents: read     # allow checkout
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_PAT }}
-
-      - name: Build & Push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_NAME }}
-
-      - name: Azure login (OIDC)
+      - name: Log in to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Resolve Environment ID (reuse your openvscode env)
-        id: env
+      - name: Build and push image to GHCR
         run: |
-          ENV_ID=$(az containerapp show \
-            -g "${{ env.RG_DEV }}" \
-            -n "openvscode" \
-            --query "properties.environmentId" -o tsv)
-          echo "ENV_ID=$ENV_ID" >> $GITHUB_OUTPUT
+          IMAGE=ghcr.io/${{ github.repository }}/py-hello:$(date +%s)
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo ${{ secrets.GHCR_PAT }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker build -t $IMAGE .
+          docker push $IMAGE
 
-      - name: Create or Update Container App
+      - name: Deploy to Azure Container Apps
         run: |
-          set -e
-          if az containerapp show -g "${{ env.RG_DEV }}" -n "${{ env.APP_NAME }}" >/dev/null 2>&1; then
-            az containerapp update \
-              -g "${{ env.RG_DEV }}" \
-              -n "${{ env.APP_NAME }}" \
-              --image "${{ env.IMAGE_NAME }}" \
-              --set-env-vars "PORT=8080"
-          else
-            az containerapp create \
-              -g "${{ env.RG_DEV }}" \
-              -n "${{ env.APP_NAME }}" \
-              --environment "${{ steps.env.outputs.ENV_ID }}" \
-              --image "${{ env.IMAGE_NAME }}" \
-              --ingress external \
-              --target-port 8080 \
-              --min-replicas 0 --max-replicas 1 \
-              --set-env-vars "PORT=8080"
-          fi
-
-      - name: Show URL
-        run: |
-          FQDN=$(az containerapp show -g "${{ env.RG_DEV }}" -n "${{ env.APP_NAME }}" --query "properties.configuration.ingress.fqdn" -o tsv)
-          echo "App URL: https://${FQDN}/"
+          RG_DEV=rg-proto-dev
+          ENV_ID=$(az containerapp show -g "$RG_DEV" -n openvscode --query "properties.environmentId" -o tsv)
+          az containerapp up \
+            -g "$RG_DEV" \
+            -n py-hello \
+            --environment-id "$ENV_ID" \
+            --ingress external \
+            --target-port 8080 \
+            --image $IMAGE
