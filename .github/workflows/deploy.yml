@@ -70,3 +70,5 @@ jobs:
           echo "App URL:"
           az containerapp show -g "$RG_DEV" -n "$APP_NAME" \
             --query "properties.configuration.ingress.fqdn" -o tsv
+
+            
