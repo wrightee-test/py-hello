@@ -1,9 +1,10 @@
+.git
+.github
+.vscode
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.env
-*.venv
-.venv/
-.env
-.git/
+*.swp
+*.tmp
+Dockerfile

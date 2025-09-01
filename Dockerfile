@@ -1,21 +1,22 @@
 FROM python:3.11-slim
 
-# Create non-root user
+# Create app user
 RUN useradd -m appuser
+
 WORKDIR /app
 
-# Install deps
-COPY py-hello/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Install deps first (better cache)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy code
-COPY py-hello/ /app/
+# Copy the rest of the source
+COPY . /app/
 
-# Drop privileges
+# Non-root
 USER appuser
 
-# Default port (ACA uses PORT env var; we default to 8080)
+# Default port handling
 ENV PORT=8080
+EXPOSE 8080
 
-# Start with gunicorn (prod web server)
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
+CMD ["python", "app.py"]
