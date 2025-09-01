@@ -8,34 +8,28 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write        # for azure/login OIDC
-      contents: read         # for checkout
-      packages: write        # push to GHCR
-
-    env:
-      # One place to define the image tag we’ll use everywhere
-      IMAGE: ghcr.io/${{ github.repository }}/py-hello:${{ github.run_id }}
-      RG_DEV: rg-proto-dev
-      RG_SHARED: rg-proto-shared
-      ENV_NAME: cae-proto-shared
-      APP_NAME: py-hello
+      id-token: write
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Log in to Azure (OIDC)
+      - name: Log in to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
       - name: Build and push image to GHCR
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}   # <-- use GHCR_PAT
         run: |
+          IMAGE="ghcr.io/${{ github.repository }}/py-hello:${{ github.run_id }}"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "$GHCR_PAT" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
@@ -46,9 +40,15 @@ jobs:
           az provider register --namespace Microsoft.OperationalInsights --wait
 
       - name: Deploy/Update Container App
+        env:
+          RG_DEV: rg-proto-dev
+          RG_SHARED: rg-proto-shared
+          ENV_NAME: cae-proto-shared
+          APP_NAME: py-hello
         run: |
           ENV_ID=$(az containerapp env show -g "$RG_SHARED" -n "$ENV_NAME" --query id -o tsv)
 
+          # Create once, then update on subsequent runs
           if ! az containerapp show -g "$RG_DEV" -n "$APP_NAME" >/dev/null 2>&1; then
             az containerapp create \
               -g "$RG_DEV" -n "$APP_NAME" \
@@ -57,17 +57,16 @@ jobs:
               --ingress external --target-port 8080 \
               --registry-server ghcr.io \
               --registry-username "${{ github.actor }}" \
-              --registry-password "${{ secrets.GHCR_TOKEN }}"
+              --registry-password "${{ secrets.GHCR_PAT }}"
           else
             az containerapp update \
               -g "$RG_DEV" -n "$APP_NAME" \
               --image "$IMAGE" \
               --registry-server ghcr.io \
               --registry-username "${{ github.actor }}" \
-              --registry-password "${{ secrets.GHCR_TOKEN }}"
+              --registry-password "${{ secrets.GHCR_PAT }}"
           fi
 
-          echo "URL:"
+          echo "App URL:"
           az containerapp show -g "$RG_DEV" -n "$APP_NAME" \
             --query "properties.configuration.ingress.fqdn" -o tsv
-
