@@ -2,43 +2,72 @@ name: Deploy to Azure Container Apps
 
 on:
   push:
-    branches:
-      - main   # runs whenever you push to main
+    branches: [ main ]
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write    # allow GitHub to mint an OIDC token
-      contents: read     # allow checkout
+      id-token: write        # for azure/login OIDC
+      contents: read         # for checkout
+      packages: write        # push to GHCR
+
+    env:
+      # One place to define the image tag we’ll use everywhere
+      IMAGE: ghcr.io/${{ github.repository }}/py-hello:${{ github.run_id }}
+      RG_DEV: rg-proto-dev
+      RG_SHARED: rg-proto-shared
+      ENV_NAME: cae-proto-shared
+      APP_NAME: py-hello
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Log in to Azure
+      - name: Log in to Azure (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build and push image to GHCR
         run: |
-          IMAGE=ghcr.io/${{ github.repository }}/py-hello:$(date +%s)
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-          echo ${{ secrets.GHCR_PAT }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker build -t $IMAGE .
-          docker push $IMAGE
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
 
-      - name: Deploy to Azure Container Apps
+      - name: Prep Azure CLI for Container Apps
         run: |
-          RG_DEV=rg-proto-dev
-          ENV_ID=$(az containerapp show -g "$RG_DEV" -n openvscode --query "properties.environmentId" -o tsv)
-          az containerapp up \
-            -g "$RG_DEV" \
-            -n py-hello \
-            --environment-id "$ENV_ID" \
-            --ingress external \
-            --target-port 8080 \
-            --image $IMAGE
+          az extension add --name containerapp --upgrade -y || az extension update --name containerapp
+          az provider register --namespace Microsoft.App --wait
+          az provider register --namespace Microsoft.OperationalInsights --wait
+
+      - name: Deploy/Update Container App
+        run: |
+          ENV_ID=$(az containerapp env show -g "$RG_SHARED" -n "$ENV_NAME" --query id -o tsv)
+
+          if ! az containerapp show -g "$RG_DEV" -n "$APP_NAME" >/dev/null 2>&1; then
+            az containerapp create \
+              -g "$RG_DEV" -n "$APP_NAME" \
+              --environment "$ENV_ID" \
+              --image "$IMAGE" \
+              --ingress external --target-port 8080 \
+              --registry-server ghcr.io \
+              --registry-username "${{ github.actor }}" \
+              --registry-password "${{ secrets.GHCR_TOKEN }}"
+          else
+            az containerapp update \
+              -g "$RG_DEV" -n "$APP_NAME" \
+              --image "$IMAGE" \
+              --registry-server ghcr.io \
+              --registry-username "${{ github.actor }}" \
+              --registry-password "${{ secrets.GHCR_TOKEN }}"
+          fi
+
+          echo "URL:"
+          az containerapp show -g "$RG_DEV" -n "$APP_NAME" \
+            --query "properties.configuration.ingress.fqdn" -o tsv
+
